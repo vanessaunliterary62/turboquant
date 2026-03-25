@@ -147,7 +147,7 @@ def kv_cache_memory_gb(
 # Examples:
 # Llama-3-8B, 128K context:  kv_cache_memory_gb(32, 8, 128, 131072)   → 3.3 GB
 # Llama-3-70B, 128K context: kv_cache_memory_gb(80, 8, 128, 131072)   → 8.2 GB
-# Llama-3-405B, 128K context: kv_cache_memory_gb(126, 8, 128, 131072) → 13.0 GB
+# Llama-3.1-405B, 128K context: kv_cache_memory_gb(126, 8, 128, 131072) → 6.9 GB
 ```
 
 ### Quick Reference Table
@@ -156,12 +156,12 @@ def kv_cache_memory_gb(
 |-------|--------|----------|---|-------------|-------------------|---------|
 | Llama-3-8B | 32 | 8 | 128 | 16.0 GB | 3.3 GB | 12.7 GB |
 | Llama-3-70B | 80 | 8 | 128 | 40.0 GB | 8.2 GB | 31.8 GB |
-| Llama-3-405B | 126 | 8 | 128 | 63.0 GB | 13.0 GB | 50.0 GB |
+| Llama-3.1-405B | 126 | 8 | 128 | 33.8 GB | 6.9 GB | 26.9 GB |
 | Mistral-7B | 32 | 8 | 128 | 16.0 GB | 3.3 GB | 12.7 GB |
-| Gemma-2-9B | 42 | 16 | 256 | 42.0 GB | 8.6 GB | 33.4 GB |
+| Gemma-2-9B | 42 | 8 | 256 | 33.8 GB | 6.9 GB | 26.9 GB |
 | Qwen-2.5-72B | 80 | 8 | 128 | 40.0 GB | 8.2 GB | 31.8 GB |
 
-> FP16 values assume 2 bytes per value, 2 cache entries (K+V), `2 × n_layers × n_kv_heads × head_dim × seq_len × 2 bytes`. TurboQuant adds ~0.5 bytes/vector for norms.
+> FP16 calculations assume 2 bytes per value, 2 cache entries (K+V): `2 × n_layers × n_kv_heads × head_dim × seq_len × 2 bytes`. TurboQuant adds ~0.5 bytes/vector for norms.
 
 ---
 

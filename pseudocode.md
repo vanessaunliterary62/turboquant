@@ -20,7 +20,7 @@
 
 ## 1. Constants & Setup
 
-### Dimensions (typical for llama.cpp)
+### Dimensions (typical for LLM inference)
 ```
 d = head_dim             // e.g., 128 for Llama-2/3, 96 for Mistral
 b_mse = 2               // bits per coordinate for MSE stage (PolarQuant)
