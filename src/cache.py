@@ -3,17 +3,17 @@ TurboQuant KV Cache Compression — Pure PyTorch Implementation
 
 Implements the TurboQuant algorithm (Algorithm 2) for near-optimal vector
 quantization of transformer KV caches, combining:
-  - PolarQuant (2-bit MSE-optimal scalar quantization)
+  - PolarQuant (recursive polar transform + 2-bit angle quantization)
   - QJL (1-bit residual correction for unbiased inner products)
 
-Total: 3 bits per coordinate → ~4.9× compression vs FP16.
+Total: ~3 bits per coordinate → ~4.9× compression vs FP16.
 
 Reference: https://arxiv.org/abs/2504.19874
 """
 
 import math
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Callable, List, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -23,7 +23,7 @@ import torch.nn.functional as F
 # Constants
 # ---------------------------------------------------------------------------
 
-B_MSE = 2          # bits per coordinate for PolarQuant stage
+B_MSE = 3          # bits per angle for PolarQuant stage
 B_QJL = 1          # bits per coordinate for QJL residual stage
 B_TOTAL = B_MSE + B_QJL  # = 3 bits total per coordinate
 EPS = 1e-10        # numerical stability threshold
@@ -113,17 +113,114 @@ class RandomHadamardRotation:
 
 
 # ---------------------------------------------------------------------------
-# Gaussian helpers for Lloyd-Max
+# Recursive polar transform helpers
 # ---------------------------------------------------------------------------
 
-def _gaussian_pdf(x: torch.Tensor) -> torch.Tensor:
-    """Standard Gaussian PDF φ(x) = (1/√(2π)) · exp(-x²/2)."""
-    return torch.exp(-0.5 * x * x) / math.sqrt(2 * math.pi)
+def _require_power_of_two(d: int) -> None:
+    if d <= 0 or d & (d - 1):
+        raise ValueError(f"d must be a positive power of 2, got {d}")
 
 
-def _gaussian_cdf(x: torch.Tensor) -> torch.Tensor:
-    """Standard Gaussian CDF Φ(x)."""
-    return 0.5 * (1 + torch.erf(x / math.sqrt(2)))
+def _polar_level_sizes(d: int) -> Tuple[int, ...]:
+    """Number of angles emitted at each recursive level, bottom-up."""
+    _require_power_of_two(d)
+    sizes = []
+    width = d
+    while width > 1:
+        width //= 2
+        sizes.append(width)
+    return tuple(sizes)
+
+
+def recursive_polar_transform(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Convert Cartesian vectors to recursive polar coordinates.
+
+    The transform pairs coordinates bottom-up:
+      level 0:  (x1, x2) -> (r, theta)
+      level 1+: pair the radii from the previous level.
+
+    Args:
+        x: [batch, d] Cartesian vectors where d is a power of 2.
+
+    Returns:
+        angles: [batch, d-1] recursive angles in bottom-up order
+        radius: [batch, 1] final radius (equal to ||x||_2)
+    """
+    squeeze_batch = False
+    if x.dim() == 1:
+        x = x.unsqueeze(0)
+        squeeze_batch = True
+
+    d = x.shape[-1]
+    _require_power_of_two(d)
+
+    current = x
+    angle_levels = []
+    while current.shape[-1] > 1:
+        pairs = current.reshape(*current.shape[:-1], -1, 2)
+        left = pairs[..., 0]
+        right = pairs[..., 1]
+        radii = torch.sqrt(left.square() + right.square())
+        angles = torch.atan2(right, left)
+        angle_levels.append(angles.reshape(x.shape[0], -1))
+        current = radii
+
+    angles = torch.cat(angle_levels, dim=-1) if angle_levels else x.new_zeros(x.shape[0], 0)
+    radius = current.reshape(x.shape[0], 1)
+
+    if squeeze_batch:
+        return angles.squeeze(0), radius.squeeze(0)
+    return angles, radius
+
+
+def inverse_polar_transform(angles: torch.Tensor, radius: torch.Tensor) -> torch.Tensor:
+    """Invert the recursive polar transform back to Cartesian coordinates."""
+    squeeze_batch = False
+    if angles.dim() == 1:
+        angles = angles.unsqueeze(0)
+        squeeze_batch = True
+    if radius.dim() == 0:
+        radius = radius.reshape(1, 1)
+    elif radius.dim() == 1:
+        radius = radius.unsqueeze(-1)
+
+    d = angles.shape[-1] + 1
+    level_sizes = _polar_level_sizes(d)
+    current = radius
+    offset = angles.shape[-1]
+
+    for level_size in reversed(level_sizes):
+        offset -= level_size
+        level_angles = angles[..., offset:offset + level_size]
+        current = torch.stack(
+            (current * torch.cos(level_angles), current * torch.sin(level_angles)),
+            dim=-1,
+        ).reshape(angles.shape[0], -1)
+
+    if squeeze_batch:
+        return current.squeeze(0)
+    return current
+
+
+def _uniform_pdf(x: torch.Tensor) -> torch.Tensor:
+    return torch.ones_like(x)
+
+
+def _centered_recursive_angle_pdf(x: torch.Tensor, block_size: int) -> torch.Tensor:
+    """Density for upper-level recursive angles centered around 0.
+
+    For a pair of equal-size blocks with block_size original coordinates each,
+    θ = atan2(r_right, r_left) lives in [0, π/2] with density proportional to
+    sin(θ)^(block_size-1) cos(θ)^(block_size-1). We center it as δ = θ - π/4,
+    so δ ∈ [-π/4, π/4] and the density is symmetric around 0.
+    """
+    theta = x + (math.pi / 4.0)
+    valid = (x >= -math.pi / 4.0) & (x <= math.pi / 4.0)
+    pdf = torch.zeros_like(x)
+    if valid.any():
+        theta_valid = theta[valid].clamp(min=EPS, max=(math.pi / 2.0) - EPS)
+        pdf[valid] = (torch.sin(theta_valid) * torch.cos(theta_valid)).pow(block_size - 1)
+    return pdf
 
 
 # ---------------------------------------------------------------------------
@@ -132,22 +229,107 @@ def _gaussian_cdf(x: torch.Tensor) -> torch.Tensor:
 
 @dataclass
 class Codebook:
-    """Lloyd-Max scalar quantizer codebook."""
-    centroids: torch.Tensor    # [K] reconstruction values
-    boundaries: torch.Tensor   # [K+1] decision boundaries
+    """Level-wise Lloyd-Max codebooks for recursive polar angles."""
+    centroids: Tuple[torch.Tensor, ...]    # each [K], on shifted angle support
+    boundaries: Tuple[torch.Tensor, ...]   # each [K+1], on shifted angle support
+    shifts: Tuple[float, ...]              # angle shifts applied before quantization
+    level_sizes: Tuple[int, ...]           # angles emitted at each level
     d: int
     b: int
     K: int
-    sigma: float
 
     def quantize(self, x: torch.Tensor) -> torch.Tensor:
-        """Map continuous values to codebook indices."""
-        idx = torch.searchsorted(self.boundaries, x, right=False) - 1
-        return idx.clamp(0, self.K - 1).long()
+        """Map recursive angles to per-level codebook indices."""
+        squeeze_batch = False
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+            squeeze_batch = True
+
+        idx_chunks = []
+        offset = 0
+        for level_idx, level_size in enumerate(self.level_sizes):
+            level_x = x[..., offset:offset + level_size] - self.shifts[level_idx]
+            boundaries = self.boundaries[level_idx].to(device=x.device, dtype=x.dtype)
+            idx = torch.searchsorted(boundaries, level_x, right=False) - 1
+            idx_chunks.append(idx.clamp(0, self.K - 1).to(torch.uint8))
+            offset += level_size
+
+        out = torch.cat(idx_chunks, dim=-1) if idx_chunks else x.new_zeros(x.shape[0], 0, dtype=torch.uint8)
+        if squeeze_batch:
+            return out.squeeze(0)
+        return out
 
     def dequantize(self, idx: torch.Tensor) -> torch.Tensor:
-        """Map codebook indices to centroid values."""
-        return self.centroids[idx.long()]
+        """Map per-level codebook indices back to recursive angles."""
+        squeeze_batch = False
+        if idx.dim() == 1:
+            idx = idx.unsqueeze(0)
+            squeeze_batch = True
+
+        angle_chunks = []
+        offset = 0
+        for level_idx, level_size in enumerate(self.level_sizes):
+            level_idx_tensor = idx[..., offset:offset + level_size].long()
+            centroids = self.centroids[level_idx].to(device=idx.device)
+            angle_chunks.append(centroids[level_idx_tensor] + self.shifts[level_idx])
+            offset += level_size
+
+        out = torch.cat(angle_chunks, dim=-1) if angle_chunks else torch.zeros(
+            idx.shape[0], 0, device=idx.device, dtype=torch.float32
+        )
+        if squeeze_batch:
+            return out.squeeze(0)
+        return out
+
+
+def _compute_density_codebook(
+    b: int,
+    support: Tuple[float, float],
+    pdf_fn: Callable[[torch.Tensor], torch.Tensor],
+    max_iter: int,
+    tol: float,
+    device: torch.device,
+    grid_size: int = 16385,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Numerically solve the Lloyd-Max problem for a 1D density."""
+    K = 2 ** b
+    lo, hi = support
+    grid = torch.linspace(lo, hi, grid_size, device=device, dtype=torch.float64)
+    pdf = pdf_fn(grid).clamp_min(0)
+    mass = torch.trapz(pdf, grid)
+    if mass.item() <= EPS:
+        raise ValueError("Degenerate density produced zero mass")
+    pdf = pdf / mass
+
+    centroids = torch.linspace(lo, hi, K + 2, device=device, dtype=torch.float64)[1:-1]
+    boundaries = torch.empty(K + 1, device=device, dtype=torch.float64)
+    boundaries[0] = lo
+    boundaries[-1] = hi
+
+    for _ in range(max_iter):
+        boundaries[1:-1] = 0.5 * (centroids[:-1] + centroids[1:])
+        old_centroids = centroids.clone()
+
+        for i in range(K):
+            mask = (grid >= boundaries[i]) & (grid <= boundaries[i + 1])
+            grid_slice = grid[mask]
+            pdf_slice = pdf[mask]
+            if grid_slice.numel() < 2:
+                centroids[i] = 0.5 * (boundaries[i] + boundaries[i + 1])
+                continue
+
+            interval_mass = torch.trapz(pdf_slice, grid_slice)
+            if interval_mass.item() <= EPS:
+                centroids[i] = 0.5 * (boundaries[i] + boundaries[i + 1])
+            else:
+                interval_moment = torch.trapz(pdf_slice * grid_slice, grid_slice)
+                centroids[i] = interval_moment / interval_mass
+
+        if (centroids - old_centroids).abs().max().item() < tol:
+            break
+
+    boundaries[1:-1] = 0.5 * (centroids[:-1] + centroids[1:])
+    return centroids.float(), boundaries.float()
 
 
 def compute_lloyd_max_codebook(
@@ -157,43 +339,52 @@ def compute_lloyd_max_codebook(
     tol: float = 1e-12,
     device: torch.device = torch.device("cpu"),
 ) -> Codebook:
-    """Compute the Lloyd-Max scalar quantizer for N(0, 1/d).
+    """Compute level-wise Lloyd-Max angle codebooks for recursive PolarQuant."""
+    level_sizes = _polar_level_sizes(d)
+    level_centroids = []
+    level_boundaries = []
+    level_shifts = []
 
-    After random rotation, each coordinate of a unit vector follows
-    approximately N(0, σ²) where σ = 1/√d.
-    """
-    K = 2 ** b
-    sigma = 1.0 / math.sqrt(d)
+    for level_idx, _level_size in enumerate(level_sizes):
+        if level_idx == 0:
+            support = (-math.pi, math.pi)
+            shift = 0.0
+            pdf_fn = _uniform_pdf
+        else:
+            support = (-math.pi / 4.0, math.pi / 4.0)
+            shift = math.pi / 4.0
+            block_size = 2 ** level_idx
+            pdf_fn = lambda x, block_size=block_size: _centered_recursive_angle_pdf(x, block_size)
 
-    lo_init = -3 * sigma + sigma / (2 * K)
-    hi_init = 3 * sigma - sigma / (2 * K)
-    centroids = torch.linspace(lo_init, hi_init, K, device=device)
-    boundaries = torch.zeros(K + 1, device=device)
+        # For highly concentrated distributions (block_size >= 16), the density
+        # becomes a near-delta at the shift point. Use uniform quantization on a
+        # narrow support instead of numerically solving Lloyd-Max (which underflows).
+        if level_idx > 0 and block_size >= 16:
+            narrow = math.pi / (4.0 * math.sqrt(block_size))
+            support = (-narrow, narrow)
+            pdf_fn = _uniform_pdf
 
-    for _ in range(max_iter):
-        boundaries[0] = -1.0
-        boundaries[K] = 1.0
-        for i in range(1, K):
-            boundaries[i] = (centroids[i - 1] + centroids[i]) / 2.0
+        centroids, boundaries = _compute_density_codebook(
+            b=b,
+            support=support,
+            pdf_fn=pdf_fn,
+            max_iter=max_iter,
+            tol=tol,
+            device=device,
+        )
+        level_centroids.append(centroids)
+        level_boundaries.append(boundaries)
+        level_shifts.append(shift)
 
-        old_centroids = centroids.clone()
-        for i in range(K):
-            lo = boundaries[i]
-            hi = boundaries[i + 1]
-            lo_s = lo / sigma
-            hi_s = hi / sigma
-            # E[X | lo ≤ X < hi] = σ · (φ(lo/σ) - φ(hi/σ)) / (Φ(hi/σ) - Φ(lo/σ))
-            num = sigma * (_gaussian_pdf(lo_s) - _gaussian_pdf(hi_s))
-            den = _gaussian_cdf(hi_s) - _gaussian_cdf(lo_s)
-            if den.item() > EPS:
-                centroids[i] = num / den
-            else:
-                centroids[i] = (lo + hi) / 2.0
-
-        if (centroids - old_centroids).abs().max().item() < tol:
-            break
-
-    return Codebook(centroids=centroids, boundaries=boundaries, d=d, b=b, K=K, sigma=sigma)
+    return Codebook(
+        centroids=tuple(level_centroids),
+        boundaries=tuple(level_boundaries),
+        shifts=tuple(level_shifts),
+        level_sizes=level_sizes,
+        d=d,
+        b=b,
+        K=2 ** b,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -218,32 +409,28 @@ def generate_qjl_matrix(d: int, seed: int, device: torch.device = torch.device("
 
 @dataclass
 class PolarQuantCompressed:
-    """Compressed representation from PolarQuant (2-bit per coord + norm)."""
-    norm: torch.Tensor            # [batch] L2 norms
-    indices: torch.Tensor         # [batch, d] uint8 indices in {0..K-1}
+    """Compressed representation from PolarQuant (2-bit per angle + norm)."""
+    norm: torch.Tensor            # [batch] L2 norms / top-level radius
+    indices: torch.Tensor         # [batch, d-1] uint8 indices in {0..K-1}
     codebook: Codebook
     rotation: RandomHadamardRotation
 
     @property
     def d(self) -> int:
-        return self.indices.shape[-1]
+        return self.codebook.d
 
 
 def polarquant_encode(x: torch.Tensor, codebook: Codebook, rotation: RandomHadamardRotation) -> PolarQuantCompressed:
-    """PolarQuant encode: MSE-optimal 2-bit quantization (Algorithm 1)."""
+    """PolarQuant encode: precondition -> recursive polar transform -> angle quantization."""
     if x.dim() == 1:
         x = x.unsqueeze(0)
 
-    norm = x.norm(dim=-1)
-    safe_norm = norm.clamp(min=EPS)
-    x_unit = x / safe_norm.unsqueeze(-1)
-
+    norm = x.norm(dim=-1).to(torch.float16)
     zero_mask = norm < EPS
 
-    x_rotated = rotation.forward(x_unit)
-    x_rotated = x_rotated.clamp(-1.0, 1.0)
-
-    indices = codebook.quantize(x_rotated)
+    x_rotated = rotation.forward(x.float())
+    angles, _ = recursive_polar_transform(x_rotated)
+    indices = codebook.quantize(angles)
 
     if zero_mask.any():
         indices[zero_mask] = 0
@@ -252,10 +439,11 @@ def polarquant_encode(x: torch.Tensor, codebook: Codebook, rotation: RandomHadam
 
 
 def polarquant_decode(c: PolarQuantCompressed) -> torch.Tensor:
-    """PolarQuant decode: reconstruct vectors from compressed form."""
-    x_rotated_hat = c.codebook.centroids[c.indices]
-    x_unit_hat = c.rotation.inverse(x_rotated_hat)
-    x_hat = c.norm.unsqueeze(-1) * x_unit_hat
+    """PolarQuant decode: dequantize angles -> inverse polar -> inverse precondition."""
+    angles_hat = c.codebook.dequantize(c.indices)
+    radius = c.norm.float().unsqueeze(-1)
+    x_rotated_hat = inverse_polar_transform(angles_hat, radius)
+    x_hat = c.rotation.inverse(x_rotated_hat)
 
     zero_mask = c.norm < EPS
     if zero_mask.any():
@@ -552,13 +740,13 @@ class TurboQuantCache:
 def compression_ratio_fp16(d: int, b_mse: int = B_MSE) -> float:
     """Compute compression ratio vs FP16."""
     fp16_bits = d * 16
-    tq_bits = d * b_mse + 16 + d * 1 + 16  # PQ + norm + QJL signs + r_norm
+    tq_bits = (d - 1) * b_mse + 16 + d * 1 + 16  # PQ angles + norm + QJL signs + r_norm
     return fp16_bits / tq_bits
 
 
 def memory_bytes_per_vector(d: int, b_mse: int = B_MSE) -> Tuple[int, int]:
     """Returns (tq_bytes, fp16_bytes) per vector."""
-    tq_bits = d * b_mse + 16 + d * 1 + 16
+    tq_bits = (d - 1) * b_mse + 16 + d * 1 + 16
     tq_bytes = (tq_bits + 7) // 8
     fp16_bytes = d * 2
     return tq_bytes, fp16_bytes
