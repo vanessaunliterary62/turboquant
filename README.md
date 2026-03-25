@@ -73,6 +73,24 @@ python src/test_real_model.py
 
 ## Results
 
+### Real Model Validation — Mistral-7B-Instruct-v0.3
+
+Mixed-precision 3.5-bit mode (32 outlier channels at 4 bits + 96 regular at 3 bits):
+
+| Metric | Value |
+|--------|-------|
+| **Logit cosine similarity** | **0.969** |
+| **Top-1 prediction match** | **80% (4/5)** |
+| Top-5 overlap | 80% |
+| KV key reconstruction cosine | 0.988 (avg over 32 layers) |
+| KV value reconstruction cosine | 0.986 (avg over 32 layers) |
+| Compression | 4.92× vs FP16 |
+| Generation quality | Coherent, near-identical to FP16 |
+
+Generation example ("In 1969, humans first"):
+- **Normal**: "set foot on the moon. In 2019, we're still waiting for the first human to set fo..."
+- **TurboQuant**: "set foot on the moon. In 2019, we're still waiting for the first human to set fo..."
+
 ### Synthetic Vector Benchmark (d=128)
 
 | Metric | Value |
@@ -81,10 +99,6 @@ python src/test_real_model.py
 | Bits per value | 3.25 |
 | Memory saved | 79.7% |
 | Avg cosine similarity | 0.90 |
-
-### Real Model Validation
-
-*Benchmarks on real transformer models coming soon.*
 
 ## Algorithm Details
 
@@ -138,11 +152,16 @@ turboquant/
 }
 ```
 
-## Credits
+## Credits & Attribution
 
-- **Paper**: [TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate](https://arxiv.org/abs/2504.19874) (ICLR 2026)
-- **Authors**: Amir Zandieh, Majid Daliri, Majid Hadian, Vahab Mirrokni (Google Research / NYU / Google DeepMind)
+This is an **independent open-source implementation** of the TurboQuant algorithm. All credit for the algorithm design, theoretical analysis, and original research belongs to the paper authors.
+
+- **Paper**: [TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate](https://arxiv.org/abs/2504.19874) — Published at **ICLR 2026**
+- **Authors**: Amir Zandieh (Google Research), Majid Daliri (NYU), Majid Hadian (Google DeepMind), Vahab Mirrokni (Google Research)
+- **Related work**: [PolarQuant](https://arxiv.org/abs/2502.02617), [QJL](https://arxiv.org/abs/2406.03482) by overlapping authors
 - **Implementation**: [Terp AI Labs](https://github.com/OnlyTerp)
+
+This implementation is not affiliated with or endorsed by Google Research, Google DeepMind, or NYU. We built it from the public paper to make TurboQuant accessible to the open-source community.
 
 ## License
 
