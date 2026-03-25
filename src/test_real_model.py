@@ -284,8 +284,10 @@ def main():
     print("    TurboQuant -- Real Transformer Model Validation")
     print("=" * 72)
 
-    # Use Llama-3.1-8B-Instruct — the paper's benchmark model (Table 1)
-    model_name = "meta-llama/Llama-3.1-8B-Instruct"
+    # Use Mistral-7B-Instruct-v0.3 — standard dense transformer architecture,
+    # ungated, GQA with head_dim=128, similar to paper's Llama-3.1-8B benchmark.
+    # Paper also tests on Ministral-7B-Instruct (same family).
+    model_name = "mistralai/Mistral-7B-Instruct-v0.3"
 
     print(f"\n[*] Loading model: {model_name}")
     print("   (first run downloads ~2.2 GB)")
