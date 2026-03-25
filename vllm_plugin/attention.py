@@ -363,7 +363,7 @@ class TurboQuantAttentionImpl(_AttentionImpl if _VLLM_AVAILABLE else object):  #
         # --- Case 1: only compressed ---
         if n_buf == 0 and self._tq_cache is not None:
             return self._tq_cache.compute_attention(
-                0, kv_head, q_f, causal=True
+                0, kv_head, q_f
             ).to(q_vec.dtype)
 
         # --- Case 2: only buffered ---

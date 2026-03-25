@@ -92,9 +92,10 @@ def main():
     print()
 
     # ── Step 3: Create Cache ───────────────────────────────────────────
-    print(" Creating TurboQuantCache...")
+    # Use 3-bit MSE (matching the paper's 3.5-bit mode = 3-bit MSE + 1-bit QJL)
+    print(" Creating TurboQuantCache (3-bit MSE + 1-bit QJL = 4 bits total)...")
     t0 = time.perf_counter()
-    cache = TurboQuantCache(N_LAYERS, N_HEADS, D, device=DEVICE)
+    cache = TurboQuantCache(N_LAYERS, N_HEADS, D, b_mse=3, device=DEVICE)
     t_create = time.perf_counter() - t0
     print(f"   Created in {t_create * 1000:.1f} ms")
     print()

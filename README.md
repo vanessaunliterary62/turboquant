@@ -12,6 +12,8 @@
 
 ## Why TurboQuant?
 
+### 📄 Paper Results (Llama-3.1-8B-Instruct, LongBench — from [the paper](https://arxiv.org/abs/2504.19874))
+
 | Method | KV Bits | LongBench Avg | Needle-in-Haystack |
 |--------|---------|---------------|-------------------|
 | Full Precision | 16 | 50.06 | 0.997 |
@@ -21,7 +23,7 @@
 | KIVI | 3 | 48.50 | 0.981 |
 | SnapKV | — | 44.57 | 0.858 |
 
-*Results from the TurboQuant paper (Llama-3.1-8B-Instruct). Our implementation targets the same algorithm.*
+### 🔧 Our Implementation Results (Mistral-7B-Instruct-v0.3)
 
 ## How It Works
 

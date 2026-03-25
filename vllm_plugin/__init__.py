@@ -10,7 +10,7 @@ Reference: https://arxiv.org/abs/2504.19874
 
 __version__ = "0.1.0"
 __author__ = "TurboQuant Contributors"
-__license__ = "Apache-2.0"
+__license__ = "MIT"
 
 from vllm_plugin.config import TurboQuantConfig
 from vllm_plugin.attention import (

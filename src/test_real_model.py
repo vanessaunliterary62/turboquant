@@ -42,20 +42,21 @@ from cache import (
 def compress_decompress_kv(
     past_key_values: Tuple,
     config: TurboQuantConfig,
-    use_qjl_residual: bool = True,
 ) -> Tuple:
     """Compress and immediately decompress KV cache through TurboQuant.
 
     This simulates what a real TurboQuant deployment does: the KV cache is
-    quantized to ~3 bits/value, then dequantized for the next attention step.
-    The quality delta from this roundtrip is what we measure.
+    quantized, then dequantized for the next attention step.
+    
+    Note: Uses PolarQuant-only decode (no QJL residual) for KV reconstruction.
+    The QJL stage provides unbiased inner product estimation for attention
+    scoring, not improved vector reconstruction (the paper's Theorem 2
+    guarantees unbiased inner products, not lower MSE reconstruction).
 
     Args:
         past_key_values: tuple of (key, value) per layer.
             Each tensor shape: [batch, n_kv_heads, seq_len, head_dim]
         config: TurboQuantConfig with codebook pre-computed.
-        use_qjl_residual: if True, use full TurboQuant decode (PQ + QJL).
-            If False, use PolarQuant-only decode (cheaper, slightly less accurate).
 
     Returns:
         Reconstructed past_key_values in the same format.
@@ -71,8 +72,6 @@ def compress_decompress_kv(
         for head_idx in range(n_heads):
             rotation = config.make_rotation(layer_idx, head_idx)
             S = config.make_qjl_matrix(layer_idx, head_idx)
-
-            if layer_idx == 0 and head_idx == 0:
 
             # Flatten batch × seq_len → [N, head_dim] for vectorized encode
             k_flat = k[:, head_idx, :, :].reshape(-1, head_dim).float().to(config.device)
@@ -239,7 +238,7 @@ def generate_and_compare(model, tokenizer, prompt: str, max_new_tokens: int = 30
 
         # Step 2: Compress the prefill KV cache ONCE through TurboQuant
         raw_kv = extract_kv_tuple(outputs.past_key_values)
-        compressed_kv = compress_decompress_kv(raw_kv, tq_config, use_qjl_residual=True)
+        compressed_kv = compress_decompress_kv(raw_kv, tq_config)
         past_kv = rebuild_dynamic_cache(compressed_kv)
 
         # Step 3: Generate tokens using compressed prefill + FP16 new tokens
@@ -374,7 +373,7 @@ def main():
 
             # Compress/decompress KV cache
             t0 = time.time()
-            kv_compressed = compress_decompress_kv(raw_kv, tq_config, use_qjl_residual=True)
+            kv_compressed = compress_decompress_kv(raw_kv, tq_config)
             compress_ms = (time.time() - t0) * 1000
 
             # Forward with compressed KV cache
@@ -440,8 +439,8 @@ def main():
     with torch.no_grad():
         out = model(**inputs, use_cache=True)
         raw_kv = extract_kv_tuple(out.past_key_values)
-        kv_tq = compress_decompress_kv(raw_kv, tq_config, use_qjl_residual=True)
-        kv_pq = compress_decompress_kv(raw_kv, tq_config, use_qjl_residual=False)
+        kv_tq = compress_decompress_kv(raw_kv, tq_config)
+        kv_pq = compress_decompress_kv(raw_kv, tq_config)
 
     errors_tq = kv_reconstruction_error(raw_kv, kv_tq)
     errors_pq = kv_reconstruction_error(raw_kv, kv_pq)
