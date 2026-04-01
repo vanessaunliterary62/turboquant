@@ -29,21 +29,16 @@ Built the first public TurboQuant CUDA binary for RTX 5090 (Blackwell SM120). Cl
 - f16 OOMs at ~232K
 
 ## Key Files
-- Build binary: T:\ik-llama\llama-cpp-turboquant\build\bin\llama-server.exe (4.7 MB)
-- Build binary: T:\ik-llama\llama-cpp-turboquant\build\bin\llama-cli.exe (2.6 MB)
-- Build script: T:\ik-llama\build_turbo2.bat
-- Model: T:\ik-llama\Qwen3.5-27B-Q4_K_M.gguf
-- Benchmark doc: C:\Users\tworo\.openclaw\workspace\kvtc-src\BENCHMARK_RESULTS.md
-- Vault entry: vault/projects/turboquant-cuda-rtx5090-first-benchmark.md
+- Build binaries: `build/bin/llama-server.exe` (4.7 MB), `build/bin/llama-cli.exe` (2.6 MB)
+- Model: Qwen3.5-27B-Q4_K_M.gguf (15.6 GB)
 
 ## Theoretical Context Limits (Qwen3.5-27B on 5090)
 - f16: 232K | q8_0: 436K | q4_0: 823K | turbo3: 1.1M | turbo2: 1.5M
 - KVTC 20x theoretical: 4.6M tokens
 
-## Build Location on 5090
-- Repo: T:\ik-llama\llama-cpp-turboquant (seanrasch fork)
-- Also cloned: T:\ik-llama\llama-cpp-tq3 (Aaryan-Kapoor fork, turboquant-tq3_0 branch)
-- Also cloned: T:\ik-llama\turboquant_plus (TheTom's Python experiments)
+## Build Sources
+- Repo: seanrasch/llama-cpp-turboquant fork
+- Also tested: Aaryan-Kapoor fork (turboquant-tq3_0 branch), TheTom's Python experiments
 
 ## Next Steps
 - Post benchmarks to llama.cpp discussion #20969
