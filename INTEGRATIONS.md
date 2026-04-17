@@ -170,7 +170,7 @@ pip install -e /path/to/turboquant
 import torch
 from kvpress import ExpectedAttentionPress
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from turboquant import TurboQuantCache, TurboQuantConfig
+from turboquant import TurboQuantCache
 
 model_id = "meta-llama/Llama-3.1-8B-Instruct"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -180,18 +180,21 @@ model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.bfloat1
 # 1. KVPress decides which tokens survive
 press = ExpectedAttentionPress(compression_ratio=0.5)
 
-# 2. TurboQuant compresses every surviving token
-tq_config = TurboQuantConfig(
-    num_layers=model.config.num_hidden_layers,
-    num_heads=model.config.num_attention_heads,
-    num_kv_heads=model.config.num_key_value_heads,
-    head_dim=model.config.hidden_size // model.config.num_attention_heads,
-    b_mse=2, b_qjl=1,
+# 2. TurboQuant compresses every surviving token. The public TurboQuantCache
+#    takes positional (n_layers, n_heads, d=head_dim, b_mse=2, ...).
+head_dim = model.config.hidden_size // model.config.num_attention_heads
+tq_cache = TurboQuantCache(
+    n_layers=model.config.num_hidden_layers,
+    n_heads=model.config.num_key_value_heads,   # compress one cache per KV head (GQA)
+    d=head_dim,
+    b_mse=2,                                     # 2-bit MSE regular + 1-bit QJL residual
+    mixed_precision=True,                         # outlier channels get b_mse+1 bits
+    device=torch.device("cuda"),
 )
 
 # Apply press hook that, after eviction, routes surviving tokens through
-# TurboQuantCache.encode() / .decode().
-with press(model, backend=TurboQuantCache(tq_config)):
+# TurboQuantCache.store() / .attention_scores().
+with press(model, backend=tq_cache):
     out = model.generate(**tokenizer(long_prompt, return_tensors="pt").to("cuda"),
                          max_new_tokens=256)
 ```
@@ -213,18 +216,30 @@ TurboQuant is a drop-in **tensor format** for LMCache:
 
 ```python
 from lmcache import LMCache
-from turboquant import TurboQuantCache, TurboQuantConfig
+from turboquant import TurboQuantCache
 
-# Compose: LMCache for cross-process sharing, TurboQuant for per-token compression
+# Compose: LMCache for cross-process sharing, TurboQuant for per-token compression.
+# The public TurboQuantCache takes positional (n_layers, n_heads, d, b_mse, ...).
 lmcache = LMCache(backend="redis://cache.internal:6379")
-tq_cache = TurboQuantCache(TurboQuantConfig(
-    num_layers=32, num_heads=32, num_kv_heads=8, head_dim=128, b_mse=2, b_qjl=1))
+tq_cache = TurboQuantCache(
+    n_layers=32,
+    n_heads=8,          # compress once per KV head under GQA
+    d=128,
+    b_mse=2,
+    mixed_precision=True,
+)
 
-# Store TurboQuant-compressed K/V under a document ID
-lmcache.put(f"doc:{doc_id}", tq_cache.encode(k, v))
+# Store TurboQuant-compressed K/V under a document ID. tq_cache.store() writes into
+# per-(layer, head) ring buffers; for cross-session reuse you serialize the resulting
+# TurboQuantCompressed tuples (q_codes, residual_signs, norms) — see src/cache.py.
+for layer in range(tq_cache.n_layers):
+    for head in range(tq_cache.n_heads):
+        tq_cache.store(layer, head, k[layer, head], v[layer, head])
+lmcache.put(f"doc:{doc_id}", tq_cache.cache)
 
-# Retrieve and decode (in the next session, or on another node)
-k_hat, v_hat = tq_cache.decode(lmcache.get(f"doc:{doc_id}"))
+# On retrieval, attach the compressed tuples back to a freshly-built TurboQuantCache
+# with identical (n_layers, n_heads, d, b_mse) and call .attention_scores(q).
+tq_cache.cache = lmcache.get(f"doc:{doc_id}")
 ```
 
 The result: up to 4.9× smaller cache on disk + cross-session reuse. Pairs very well with
@@ -264,19 +279,21 @@ For experimentation without a serving engine, you can monkey-patch the attention
 ```python
 import torch
 from transformers import AutoModelForCausalLM
-from turboquant import TurboQuantCache, TurboQuantConfig
+from turboquant import TurboQuantCache
 
 model = AutoModelForCausalLM.from_pretrained(
     "meta-llama/Llama-3.1-8B-Instruct",
     torch_dtype=torch.bfloat16, device_map="auto",
 )
-cfg = TurboQuantConfig(
-    num_layers=model.config.num_hidden_layers,
-    num_heads=model.config.num_attention_heads,
-    num_kv_heads=model.config.num_key_value_heads,
-    head_dim=model.config.hidden_size // model.config.num_attention_heads,
+head_dim = model.config.hidden_size // model.config.num_attention_heads
+tq_cache = TurboQuantCache(
+    n_layers=model.config.num_hidden_layers,
+    n_heads=model.config.num_key_value_heads,   # GQA: compress per KV head
+    d=head_dim,
+    b_mse=2,
+    mixed_precision=True,
+    device=torch.device("cuda"),
 )
-tq_cache = TurboQuantCache(cfg)
 
 # Replace the stock past_key_values with a TQ-backed cache object.
 # (Full code in src/test_real_model.py.)
@@ -346,7 +363,7 @@ extraEnv:
 
 ### "Cache shapes don't match during decode"
 
-You likely changed `b_mse` or `b_qjl` between encode and decode. The codebook is a
+You likely changed `b_mse` (or `b_outlier`) between encode and decode. The codebook is a
 function of `(d, b_mse)`. If you persist caches across sessions (LMCache / KV Packet), pin
 these values.
 

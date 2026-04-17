@@ -179,7 +179,7 @@ memory savings. All numbers assume the listed context length fully populated.
 | **Qwen 3.5** (397B MoE) | 90 | 8 | 128 | 256K | 90 GB | 18.3 GB | 71.7 GB |
 | **Gemma 4 31B** | 56 | 8 | 128 | 128K | 28 GB | 5.7 GB | 22.3 GB |
 | **DeepSeek-V3** (MLA, effective KV) | 61 | 128 KV heads but latent | 512 latent | 128K | 8 GB (MLA) | 1.6 GB (TQ on latent) | 6.4 GB |
-| **OpenClaw 32B** (TriAttention target) | 48 | 8 | 128 | 32K | 3 GB | 0.6 GB | 2.4 GB |
+| **OpenClaw 32B** (TriAttention target) | 48 | 8 | 128 | 32K | 6 GB | 1.2 GB | 4.8 GB |
 
 > **Numbers are illustrative.** Some 2026 models have non-public exact layer/head counts
 > as of Apr 17, 2026; the above uses conservative public-spec estimates. Recompute using

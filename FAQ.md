@@ -37,10 +37,17 @@ The paper shows three regimes:
 | **2.5** | Marginal degradation (49.44) | You need maximum memory savings and can tolerate <1 pt |
 | 4.5 / 5.5 | Indistinguishable from 3.5 | Rarely worth it — diminishing returns |
 
-The "3.5" is because TurboQuant splits channels into outliers (3 bits) and regular
-(2 bits), so the weighted average is 3.5. `MixedPrecisionConfig` in [`src/cache.py`](src/cache.py)
-controls this split — see [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for the
-exact outlier handling.
+**"3.5-bit" is a mode name from the paper, not a literal bit count.** In the default
+"3.5-bit" configuration, TurboQuant splits channels into 32 outlier channels at 4
+MSE bits and 96 regular channels at 3 MSE bits, plus 1 QJL residual bit per coordinate
+— weighted-average bpv is `(32×4 + 96×3)/128 + 1 = 4.25` total, about 3.25 effective
+after accounting for the small norm overhead (see [BENCHMARKS.md](BENCHMARKS.md#current-demo-results)).
+The "3.5-bit" label is the paper's chosen name; the exact per-channel budget is controlled
+by `MixedPrecisionConfig` in [`src/cache.py`](src/cache.py) via `b_mse` / `b_outlier` —
+see [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for the exact outlier handling.
+The default in `TurboQuantCache(mixed_precision=True, b_mse=2)` is actually closer to
+the "2.5-bit" mode (3-bit outliers, 2-bit regular); bump `b_mse=3` to get the paper's
+"3.5-bit" mode.
 
 ---
 
